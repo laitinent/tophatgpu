@@ -1,0 +1,42 @@
+#version 310 es
+layout (local_size_x = 16, local_size_y = 16) in;
+
+precision highp usampler2D;
+precision highp int;
+
+layout (binding = 0) uniform usampler2D uLabelTexture;
+
+// Bit-set to track which labels we've already counted
+layout (std430, binding = 1) buffer SeenFlags {
+    uint flags[];
+};
+
+// The global counter
+layout (std430, binding = 2) buffer Counter {
+    uint count;
+};
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = textureSize(uLabelTexture, 0);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    uint label = texelFetch(uLabelTexture, pos, 0).r;
+
+    if (label > 0u) {
+        // IDs are pos.y * width + pos.x + 1.
+        // We use a bit-set to mark this unique ID as "seen".
+        uint wordIdx = label / 32u;
+        uint bitIdx = label % 32u;
+        uint bitMask = 1u << bitIdx;
+
+        // atomicOr returns the PREVIOUS value.
+        // If the bit was 0, it's the first time we've seen this label.
+        uint prev = atomicOr(flags[wordIdx], bitMask);
+
+        if ((prev & bitMask) == 0u) {
+            atomicAdd(count, 1u);
+        }
+    }
+}

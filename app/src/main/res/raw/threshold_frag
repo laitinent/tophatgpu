@@ -1,0 +1,27 @@
+#version 310 es
+precision highp float;
+
+// Input grayscale texture
+uniform sampler2D uTexture;
+
+// The threshold value for binarization (usually from Otsu's method)
+uniform float uThreshold;
+
+in vec2 vTexCoord;
+out vec4 fragColor;
+
+/**
+ * Performs simple binary thresholding.
+ * Values above the threshold become white (1.0),
+ * values below or equal become black (0.0).
+ */
+void main() {
+    // Sample the grayscale value from the texture
+    float val = texture(uTexture, vTexCoord).r;
+
+    // Apply the threshold
+    float result = val > uThreshold ? 1.0 : 0.0;
+
+    // Output the binary color
+    fragColor = vec4(result, result, result, 1.0);
+}

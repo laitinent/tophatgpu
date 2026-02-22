@@ -1,0 +1,24 @@
+#version 310 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+
+// The external camera texture (OES)
+uniform samplerExternalOES uTexture;
+
+in vec2 vTexCoord;
+out vec4 fragColor;
+
+/**
+ * Converts the OES camera texture into a grayscale 2D texture.
+ * This is the first step in the pipeline.
+ */
+void main() {
+    // Sample the color from the camera texture
+    vec3 color = texture(uTexture, vTexCoord).rgb;
+
+    // Convert to grayscale using standard luminance weights
+    float gray = dot(color, vec3(0.299, 0.587, 0.114));
+
+    // Output grayscale value in R, G, and B channels
+    fragColor = vec4(gray, gray, gray, 1.0);
+}

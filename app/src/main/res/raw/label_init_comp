@@ -1,0 +1,29 @@
+#version 310 es
+layout (local_size_x = 16, local_size_y = 16) in;
+
+// Image and sampler types require explicit precision in ESSL 3.10
+precision highp uimage2D;
+precision highp sampler2D;
+precision highp float;
+precision highp int;
+
+layout (binding = 0, r32ui) uniform writeonly uimage2D uLabelImage;
+uniform sampler2D uTexture;
+uniform float uThreshold;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uLabelImage);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    float val = texelFetch(uTexture, pos, 0).r;
+    uint label = 0u;
+
+    if (val > uThreshold) {
+        // Unique ID for each pixel based on flattened coordinate
+        label = uint(pos.y * size.x + pos.x + 1);
+    }
+
+    imageStore(uLabelImage, pos, uvec4(label, 0u, 0u, 0u));
+}

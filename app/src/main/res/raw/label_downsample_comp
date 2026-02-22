@@ -1,0 +1,25 @@
+#version 310 es
+layout (local_size_x = 16, local_size_y = 16) in;
+
+precision highp uimage2D;
+
+layout (binding = 0, r32ui) uniform readonly uimage2D uInput;
+layout (binding = 1, r32ui) uniform writeonly uimage2D uOutput;
+
+/**
+ * Downsamples the label texture by picking one pixel for every NxN block.
+ * This is used to reduce the data transferred to CPU for unique label counting.
+ */
+void main() {
+    ivec2 outPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(uOutput);
+    ivec2 inSize = imageSize(uInput);
+
+    if (outPos.x >= outSize.x || outPos.y >= outSize.y) return;
+
+    // Simple point sampling for downsampling labels
+    ivec2 inPos = outPos * (inSize / outSize);
+
+    uint label = imageLoad(uInput, inPos).r;
+    imageStore(uOutput, outPos, uvec4(label, 0u, 0u, 0u));
+}

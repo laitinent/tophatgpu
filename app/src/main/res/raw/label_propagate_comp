@@ -1,0 +1,47 @@
+#version 310 es
+layout (local_size_x = 16, local_size_y = 16) in;
+
+precision highp uimage2D;
+precision highp int;
+
+layout (binding = 0, r32ui) uniform readonly uimage2D uReadLabels;
+layout (binding = 1, r32ui) uniform writeonly uimage2D uWriteLabels;
+
+/**
+ * Propagates labels to neighbors.
+ * Each pixel takes the minimum non-zero label from its 3x3 neighborhood.
+ */
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uReadLabels);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    uint currentLabel = imageLoad(uReadLabels, pos).r;
+
+    if (currentLabel == 0u) {
+        imageStore(uWriteLabels, pos, uvec4(0u, 0u, 0u, 0u));
+        return;
+    }
+
+    uint minLabel = currentLabel;
+
+    // Check 8 neighbors
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            if (x == 0 && y == 0) continue;
+
+            ivec2 neighborPos = pos + ivec2(x, y);
+            if (neighborPos.x >= 0 && neighborPos.x < size.x &&
+                neighborPos.y >= 0 && neighborPos.y < size.y) {
+
+                uint neighborLabel = imageLoad(uReadLabels, neighborPos).r;
+                if (neighborLabel > 0u && neighborLabel < minLabel) {
+                    minLabel = neighborLabel;
+                }
+            }
+        }
+    }
+
+    imageStore(uWriteLabels, pos, uvec4(minLabel, 0u, 0u, 0u));
+}

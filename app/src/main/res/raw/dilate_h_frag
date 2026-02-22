@@ -1,0 +1,33 @@
+#version 310 es
+precision highp float;
+
+// Input grayscale texture
+uniform sampler2D uTexture;
+
+// The width of a single texel (1.0 / texture_width)
+uniform float texelWidth;
+
+// Half-size of the structural element (kernel)
+uniform int kernelSize;
+
+in vec2 vTexCoord;
+out vec4 fragColor;
+
+/**
+ * Performs a horizontal dilation pass.
+ * Dilation expands bright areas by taking the maximum value
+ * in the neighborhood defined by the kernel.
+ */
+void main() {
+    float maxVal = 0.0;
+
+    // Iterate through the horizontal neighborhood
+    for(int i = -kernelSize; i <= kernelSize; i++){
+        // Sample the red channel and keep the maximum
+        float v = texture(uTexture, vTexCoord + vec2(float(i) * texelWidth, 0.0)).r;
+        maxVal = max(maxVal, v);
+    }
+
+    // Output the result as a grayscale color
+    fragColor = vec4(maxVal, maxVal, maxVal, 1.0);
+}

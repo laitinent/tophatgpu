@@ -1,0 +1,24 @@
+#version 310 es
+layout (local_size_x = 256) in;
+
+layout (std430, binding = 1) buffer SeenFlags {
+    uint flags[];
+};
+
+layout (std430, binding = 2) buffer Counter {
+    uint count;
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+
+    // Clear the global counter once
+    if (id == 0u) {
+        count = 0u;
+    }
+
+    // Clear the bit-set (flags buffer)
+    // We assume the buffer size is passed or managed.
+    // In our case, the buffer is large enough for all pixel IDs.
+    flags[id] = 0u;
+}

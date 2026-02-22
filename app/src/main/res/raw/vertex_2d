@@ -1,0 +1,24 @@
+#version 310 es
+
+// Input vertex position (usually a full-screen quad)
+layout (location = 0) in vec4 aPosition;
+
+// Input texture coordinate
+layout (location = 1) in vec2 aTexCoord;
+
+// SurfaceTexture transformation matrix (from camera stream)
+uniform mat4 uSTMatrix;
+
+out vec2 vTexCoord;
+
+/**
+ * Standard vertex shader for full-screen passes.
+ * Transforms texture coordinates to handle camera rotation/flipping.
+ */
+void main() {
+    // Pass position directly for full-screen drawing
+    gl_Position = aPosition;
+
+    // Apply SurfaceTexture matrix to coordinates
+    vTexCoord = (uSTMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;
+}

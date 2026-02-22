@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/main"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <com.example.tophatgpu.MyGLSurfaceView
+        android:id="@+id/glView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@id/controls_container"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/tv_fps"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:textColor="#FFFF00"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:text="FPS: 0"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <ImageButton
+        android:id="@+id/btn_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:src="@android:drawable/ic_dialog_info"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        android:contentDescription="Information"
+        app:tint="#FFFF00" />
+
+    <LinearLayout
+        android:id="@+id/controls_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#80000000"
+        android:orientation="vertical"
+        android:padding="8dp"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_kernel_original"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Original"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btn_kernel_x2"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="x2"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btn_kernel_x4"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="x4"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <ToggleButton
+                android:id="@+id/toggle_subtraction"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textOff="Sub OFF"
+                android:textOn="Sub ON"
+                android:checked="true"
+                android:textSize="12sp" />
+
+            <ToggleButton
+                android:id="@+id/toggle_op_cl"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textOff="Closing"
+                android:textOn="Opening"
+                android:checked="true"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btn_threshold_mode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="None"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
