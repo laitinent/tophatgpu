@@ -1,0 +1,11 @@
+#version 310 es
+
+layout (location = 0) in vec2 aPosition;
+
+/**
+ * Simple vertex shader for drawing rectangles in normalized device coordinates.
+ */
+void main() {
+    // Input is already in -1 to 1 range
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+}

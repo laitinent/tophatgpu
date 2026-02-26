@@ -1,0 +1,41 @@
+#version 310 es
+layout (local_size_x = 16, local_size_y = 16) in;
+
+precision highp usampler2D;
+precision highp int;
+
+layout (binding = 0) uniform usampler2D uLabelTexture;
+
+struct BBox {
+    uint minX;
+    uint minY;
+    uint maxX;
+    uint maxY;
+};
+
+layout (std430, binding = 3) buffer BBoxBuffer {
+    BBox bboxes[];
+};
+
+/**
+ * Calculates Bounding Box for each label ID.
+ * Every pixel with a label updates the global BBox for that label ID.
+ * Since label IDs are derived from initial coordinates, they are very sparse.
+ */
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = textureSize(uLabelTexture, 0);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    uint label = texelFetch(uLabelTexture, pos, 0).r;
+
+    if (label > 0u) {
+        // Optimization: Use atomic min/max to update the label's bounding box
+        // Label IDs are indices into the SSBO (sparse)
+        atomicMin(bboxes[label].minX, uint(pos.x));
+        atomicMin(bboxes[label].minY, uint(pos.y));
+        atomicMax(bboxes[label].maxX, uint(pos.x));
+        atomicMax(bboxes[label].maxY, uint(pos.y));
+    }
+}

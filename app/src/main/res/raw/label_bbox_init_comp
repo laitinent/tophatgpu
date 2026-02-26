@@ -1,0 +1,23 @@
+#version 310 es
+layout (local_size_x = 256) in;
+
+struct BBox {
+    uint minX;
+    uint minY;
+    uint maxX;
+    uint maxY;
+};
+
+layout (std430, binding = 3) buffer BBoxBuffer {
+    BBox bboxes[];
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    // We initialize min with a large value and max with 0
+    // Using 4096 as it's larger than any possible coordinate (1920 or 1080)
+    bboxes[id].minX = 4096u;
+    bboxes[id].minY = 4096u;
+    bboxes[id].maxX = 0u;
+    bboxes[id].maxY = 0u;
+}

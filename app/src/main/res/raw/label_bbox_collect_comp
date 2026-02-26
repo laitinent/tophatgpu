@@ -1,0 +1,38 @@
+#version 310 es
+layout (local_size_x = 256) in;
+
+struct BBox {
+    uint minX;
+    uint minY;
+    uint maxX;
+    uint maxY;
+};
+
+layout (std430, binding = 3) buffer BBoxBuffer {
+    BBox bboxes[];
+};
+
+layout (std430, binding = 4) buffer CompactBBoxBuffer {
+    BBox compactBBoxes[];
+};
+
+layout (std430, binding = 5) buffer CompactCounter {
+    uint compactCount;
+};
+
+uniform uint uMaxLabels;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uMaxLabels) return;
+
+    BBox box = bboxes[id];
+
+    // Check if this label was actually used (maxX was updated)
+    if (box.maxX >= box.minX) {
+        uint idx = atomicAdd(compactCount, 1u);
+        if (idx < 1000u) { // Limit to 1000 compact bboxes
+            compactBBoxes[idx] = box;
+        }
+    }
+}

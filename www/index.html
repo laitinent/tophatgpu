@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Top-Hat GPU Web</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; color: white; }
+        #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.5); padding: 10px; pointer-events: none; }
+        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; }
+        button { padding: 10px 20px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 4px; }
+        button.active { background: #007bff; border-color: #0056b3; }
+    </style>
+</head>
+<body>
+    <div id="info">
+        FPS: <span id="fps">0</span><br>
+        Mode: <span id="modeText">None</span>
+    </div>
+    <div id="controls">
+        <button id="btnNone" class="active">Original</button>
+        <button id="btnWhiteTopHat">White Top-Hat</button>
+        <button id="btnBlackTopHat">Black Top-Hat</button>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        let camera, scene, renderer, video, videoTexture;
+        let grayscaleTarget, erodeTarget, dilateTarget, finalTarget;
+        let grayscalePass, erodePass, dilatePass, subtractPass, screenPass;
+
+        let currentMode = 'none'; // 'none', 'white', 'black'
+        let frameCount = 0;
+        let lastTime = performance.now();
+
+        const KERNEL_SIZE = 3;
+
+        async function init() {
+            // Setup Camera
+            video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720 }
+                });
+                video.srcObject = stream;
+                await video.play();
+            } catch (err) {
+                console.error("Camera access denied:", err);
+                alert("Camera access is required for this demo.");
+                return;
+            }
+
+            // Setup THREE.js
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            videoTexture = new THREE.VideoTexture(video);
+            const width = video.videoWidth;
+            const height = video.videoHeight;
+
+            // Render Targets
+            const rtParams = { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat };
+            grayscaleTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
+            erodeTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
+            dilateTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
+            finalTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
+
+            // Shaders
+            const vertexShader = `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+
+            const grayscaleFrag = `
+                uniform sampler2D tDiffuse;
+                varying vec2 vUv;
+                void main() {
+                    vec4 col = texture2D(tDiffuse, vUv);
+                    float gray = dot(col.rgb, vec3(0.299, 0.587, 0.114));
+                    gl_FragColor = vec4(vec3(gray), 1.0);
+                }
+            `;
+
+            const erodeFrag = `
+                uniform sampler2D tDiffuse;
+                uniform vec2 texelSize;
+                varying vec2 vUv;
+                void main() {
+                    float minVal = 1.0;
+                    for(int y = -${KERNEL_SIZE}; y <= ${KERNEL_SIZE}; y++) {
+                        for(int x = -${KERNEL_SIZE}; x <= ${KERNEL_SIZE}; x++) {
+                            float val = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * texelSize).r;
+                            minVal = min(minVal, val);
+                        }
+                    }
+                    gl_FragColor = vec4(vec3(minVal), 1.0);
+                }
+            `;
+
+            const dilateFrag = `
+                uniform sampler2D tDiffuse;
+                uniform vec2 texelSize;
+                varying vec2 vUv;
+                void main() {
+                    float maxVal = 0.0;
+                    for(int y = -${KERNEL_SIZE}; y <= ${KERNEL_SIZE}; y++) {
+                        for(int x = -${KERNEL_SIZE}; x <= ${KERNEL_SIZE}; x++) {
+                            float val = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * texelSize).r;
+                            maxVal = max(maxVal, val);
+                        }
+                    }
+                    gl_FragColor = vec4(vec3(maxVal), 1.0);
+                }
+            `;
+
+            const subtractFrag = `
+                uniform sampler2D tOriginal;
+                uniform sampler2D tProcessed;
+                uniform bool reverse;
+                varying vec2 vUv;
+                void main() {
+                    float orig = texture2D(tOriginal, vUv).r;
+                    float proc = texture2D(tProcessed, vUv).r;
+                    float res = reverse ? (proc - orig) : (orig - proc);
+                    gl_FragColor = vec4(vec3(max(res, 0.0)), 1.0);
+                }
+            `;
+
+            // Fullscreen Quad
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            scene = new THREE.Scene();
+            const geometry = new THREE.PlaneGeometry(2, 2);
+
+            grayscalePass = new THREE.ShaderMaterial({
+                vertexShader, fragmentShader: grayscaleFrag,
+                uniforms: { tDiffuse: { value: videoTexture } }
+            });
+
+            erodePass = new THREE.ShaderMaterial({
+                vertexShader, fragmentShader: erodeFrag,
+                uniforms: {
+                    tDiffuse: { value: null },
+                    texelSize: { value: new THREE.Vector2(1/width, 1/height) }
+                }
+            });
+
+            dilatePass = new THREE.ShaderMaterial({
+                vertexShader, fragmentShader: dilateFrag,
+                uniforms: {
+                    tDiffuse: { value: null },
+                    texelSize: { value: new THREE.Vector2(1/width, 1/height) }
+                }
+            });
+
+            subtractPass = new THREE.ShaderMaterial({
+                vertexShader, fragmentShader: subtractFrag,
+                uniforms: {
+                    tOriginal: { value: null },
+                    tProcessed: { value: null },
+                    reverse: { value: false }
+                }
+            });
+
+            const mesh = new THREE.Mesh(geometry, grayscalePass);
+            scene.add(mesh);
+
+            // Controls
+            document.getElementById('btnNone').onclick = () => setMode('none');
+            document.getElementById('btnWhiteTopHat').onclick = () => setMode('white');
+            document.getElementById('btnBlackTopHat').onclick = () => setMode('black');
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            if(mode === 'none') document.getElementById('btnNone').classList.add('active');
+            if(mode === 'white') document.getElementById('btnWhiteTopHat').classList.add('active');
+            if(mode === 'black') document.getElementById('btnBlackTopHat').classList.add('active');
+            document.getElementById('modeText').innerText = mode.toUpperCase();
+        }
+
+        function onWindowResize() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+
+            frameCount++;
+            const now = performance.now();
+            if (now - lastTime >= 1000) {
+                document.getElementById('fps').innerText = Math.round((frameCount * 1000) / (now - lastTime));
+                frameCount = 0;
+                lastTime = now;
+            }
+        }
+
+        function render() {
+            const mesh = scene.children[0];
+
+            // Pass 1: Grayscale
+            mesh.material = grayscalePass;
+            renderer.setRenderTarget(grayscaleTarget);
+            renderer.render(scene, camera);
+
+            if (currentMode === 'none') {
+                renderer.setRenderTarget(null);
+                renderer.render(scene, camera);
+                return;
+            }
+
+            if (currentMode === 'white') {
+                // Opening: Erode then Dilate
+                mesh.material = erodePass;
+                erodePass.uniforms.tDiffuse.value = grayscaleTarget.texture;
+                renderer.setRenderTarget(erodeTarget);
+                renderer.render(scene, camera);
+
+                mesh.material = dilatePass;
+                dilatePass.uniforms.tDiffuse.value = erodeTarget.texture;
+                renderer.setRenderTarget(dilateTarget);
+                renderer.render(scene, camera);
+
+                // Subtraction: Original - Opened
+                mesh.material = subtractPass;
+                subtractPass.uniforms.tOriginal.value = grayscaleTarget.texture;
+                subtractPass.uniforms.tProcessed.value = dilateTarget.texture;
+                subtractPass.uniforms.reverse.value = false;
+            } else if (currentMode === 'black') {
+                // Closing: Dilate then Erode
+                mesh.material = dilatePass;
+                dilatePass.uniforms.tDiffuse.value = grayscaleTarget.texture;
+                renderer.setRenderTarget(dilateTarget);
+                renderer.render(scene, camera);
+
+                mesh.material = erodePass;
+                erodePass.uniforms.tDiffuse.value = dilateTarget.texture;
+                renderer.setRenderTarget(erodeTarget);
+                renderer.render(scene, camera);
+
+                // Subtraction: Closed - Original
+                mesh.material = subtractPass;
+                subtractPass.uniforms.tOriginal.value = grayscaleTarget.texture;
+                subtractPass.uniforms.tProcessed.value = erodeTarget.texture;
+                subtractPass.uniforms.reverse.value = true;
+            }
+
+            renderer.setRenderTarget(null);
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
