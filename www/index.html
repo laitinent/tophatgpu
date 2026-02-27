@@ -1,276 +1,397 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Top-Hat GPU Web</title>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Native WebGPU Morphology</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; color: white; }
-        #info { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.5); padding: 10px; pointer-events: none; }
-        #controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; }
-        button { padding: 10px 20px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 4px; }
-        button.active { background: #007bff; border-color: #0056b3; }
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: black;
+      }
+      #ui {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+      }
+      button {
+        padding: 10px 20px;
+      }
+      button.active {
+        background: #2a7fff;
+        color: white;
+      }
     </style>
-</head>
-<body>
-    <div id="info">
-        FPS: <span id="fps">0</span><br>
-        Mode: <span id="modeText">None</span>
-    </div>
-    <div id="controls">
-        <button id="btnNone" class="active">Original</button>
-        <button id="btnWhiteTopHat">White Top-Hat</button>
-        <button id="btnBlackTopHat">Black Top-Hat</button>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="none" class="active">Original</button>
+      <button id="white">White TopHat</button>
+      <button id="black">Black TopHat</button>
     </div>
 
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-            }
-        }
-    </script>
+    <canvas id="gpuCanvas"></canvas>
 
     <script type="module">
-        import * as THREE from 'three';
+      if (!navigator.gpu) {
+        alert("WebGPU not supported");
+        throw "";
+      }
 
-        let camera, scene, renderer, video, videoTexture;
-        let grayscaleTarget, erodeTarget, dilateTarget, finalTarget;
-        let grayscalePass, erodePass, dilatePass, subtractPass, screenPass;
+      // ---------------- CAMERA ----------------
+      const video = document.createElement("video");
+      video.autoplay = true;
+      video.playsInline = true;
 
-        let currentMode = 'none'; // 'none', 'white', 'black'
-        let frameCount = 0;
-        let lastTime = performance.now();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720 },
+      });
 
-        const KERNEL_SIZE = 3;
+      video.srcObject = stream;
+      await video.play();
 
-        async function init() {
-            // Setup Camera
-            video = document.createElement('video');
-            video.autoplay = true;
-            video.playsInline = true;
+      const width = video.videoWidth;
+      const height = video.videoHeight;
 
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 1280, height: 720 }
-                });
-                video.srcObject = stream;
-                await video.play();
-            } catch (err) {
-                console.error("Camera access denied:", err);
-                alert("Camera access is required for this demo.");
-                return;
-            }
+      // ---------------- WEBGPU SETUP ----------------
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
 
-            // Setup THREE.js
-            renderer = new THREE.WebGLRenderer({ antialias: false });
-            renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
+      const canvas = document.getElementById("gpuCanvas");
+      canvas.width = width;
+      canvas.height = height;
 
-            videoTexture = new THREE.VideoTexture(video);
-            const width = video.videoWidth;
-            const height = video.videoHeight;
+      const context = canvas.getContext("webgpu");
+      const format = navigator.gpu.getPreferredCanvasFormat();
 
-            // Render Targets
-            const rtParams = { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat };
-            grayscaleTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
-            erodeTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
-            dilateTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
-            finalTarget = new THREE.WebGLRenderTarget(width, height, rtParams);
+      context.configure({
+        device,
+        format,
+        alphaMode: "opaque",
+      });
 
-            // Shaders
-            const vertexShader = `
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `;
+      // External video texture
+      function getVideoTexture() {
+        return device.importExternalTexture({
+          source: video,
+        });
+      }
 
-            const grayscaleFrag = `
-                uniform sampler2D tDiffuse;
-                varying vec2 vUv;
-                void main() {
-                    vec4 col = texture2D(tDiffuse, vUv);
-                    float gray = dot(col.rgb, vec3(0.299, 0.587, 0.114));
-                    gl_FragColor = vec4(vec3(gray), 1.0);
-                }
-            `;
+      // Storage texture helper
+      function createStorageTexture() {
+        return device.createTexture({
+          size: [width, height],
+          format: "rgba8unorm",
+          usage:
+            GPUTextureUsage.STORAGE_BINDING |
+            GPUTextureUsage.TEXTURE_BINDING |
+            GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+      }
 
-            const erodeFrag = `
-                uniform sampler2D tDiffuse;
-                uniform vec2 texelSize;
-                varying vec2 vUv;
-                void main() {
-                    float minVal = 1.0;
-                    for(int y = -${KERNEL_SIZE}; y <= ${KERNEL_SIZE}; y++) {
-                        for(int x = -${KERNEL_SIZE}; x <= ${KERNEL_SIZE}; x++) {
-                            float val = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * texelSize).r;
-                            minVal = min(minVal, val);
-                        }
-                    }
-                    gl_FragColor = vec4(vec3(minVal), 1.0);
-                }
-            `;
+      const grayTex = createStorageTexture();
+      const erodeTex = createStorageTexture();
+      const dilateTex = createStorageTexture();
+      const tempTex = createStorageTexture();
+      const resultTex = createStorageTexture();
 
-            const dilateFrag = `
-                uniform sampler2D tDiffuse;
-                uniform vec2 texelSize;
-                varying vec2 vUv;
-                void main() {
-                    float maxVal = 0.0;
-                    for(int y = -${KERNEL_SIZE}; y <= ${KERNEL_SIZE}; y++) {
-                        for(int x = -${KERNEL_SIZE}; x <= ${KERNEL_SIZE}; x++) {
-                            float val = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * texelSize).r;
-                            maxVal = max(maxVal, val);
-                        }
-                    }
-                    gl_FragColor = vec4(vec3(maxVal), 1.0);
-                }
-            `;
+      const WORKGROUP = 8;
+      const K = 3;
 
-            const subtractFrag = `
-                uniform sampler2D tOriginal;
-                uniform sampler2D tProcessed;
-                uniform bool reverse;
-                varying vec2 vUv;
-                void main() {
-                    float orig = texture2D(tOriginal, vUv).r;
-                    float proc = texture2D(tProcessed, vUv).r;
-                    float res = reverse ? (proc - orig) : (orig - proc);
-                    gl_FragColor = vec4(vec3(max(res, 0.0)), 1.0);
-                }
-            `;
+      // ---------------- SHADER CREATION ----------------
+      function computePipeline(code) {
+        return device.createComputePipeline({
+          layout: "auto",
+          compute: {
+            module: device.createShaderModule({ code }),
+            entryPoint: "main",
+          },
+        });
+      }
 
-            // Fullscreen Quad
-            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-            scene = new THREE.Scene();
-            const geometry = new THREE.PlaneGeometry(2, 2);
+      // ---------- GRAYSCALE ----------
+      const grayscalePipeline = computePipeline(`
+@group(0) @binding(0) var inputTex : texture_external;
+@group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
 
-            grayscalePass = new THREE.ShaderMaterial({
-                vertexShader, fragmentShader: grayscaleFrag,
-                uniforms: { tDiffuse: { value: videoTexture } }
-            });
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
-            erodePass = new THREE.ShaderMaterial({
-                vertexShader, fragmentShader: erodeFrag,
-                uniforms: {
-                    tDiffuse: { value: null },
-                    texelSize: { value: new THREE.Vector2(1/width, 1/height) }
-                }
-            });
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
 
-            dilatePass = new THREE.ShaderMaterial({
-                vertexShader, fragmentShader: dilateFrag,
-                uniforms: {
-                    tDiffuse: { value: null },
-                    texelSize: { value: new THREE.Vector2(1/width, 1/height) }
-                }
-            });
+  let color = textureLoad(inputTex, vec2<i32>(id.xy));
+  let g = dot(color.rgb, vec3<f32>(0.299,0.587,0.114));
 
-            subtractPass = new THREE.ShaderMaterial({
-                vertexShader, fragmentShader: subtractFrag,
-                uniforms: {
-                    tOriginal: { value: null },
-                    tProcessed: { value: null },
-                    reverse: { value: false }
-                }
-            });
+  textureStore(outTex,
+    vec2<i32>(id.xy),
+    vec4<f32>(g,g,g,1.0));
+}
+`);
 
-            const mesh = new THREE.Mesh(geometry, grayscalePass);
-            scene.add(mesh);
+      // ---------- EROSION ----------
+      const erosionPipeline = computePipeline(`
+@group(0) @binding(0) var inputTex : texture_2d<f32>;
+@group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
 
-            // Controls
-            document.getElementById('btnNone').onclick = () => setMode('none');
-            document.getElementById('btnWhiteTopHat').onclick = () => setMode('white');
-            document.getElementById('btnBlackTopHat').onclick = () => setMode('black');
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
-            window.addEventListener('resize', onWindowResize);
-            animate();
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+  var minVal : f32 = 1.0;
+
+  for (var y:i32=-${K}; y<=${K}; y++) {
+    for (var x:i32=-${K}; x<=${K}; x++) {
+
+      let c = vec2<i32>(id.xy) + vec2<i32>(x,y);
+
+      if (c.x < 0 || c.y < 0 ||
+          c.x >= i32(dims.x) ||
+          c.y >= i32(dims.y)) {
+        continue;
+      }
+
+      let v = textureLoad(inputTex, c, 0).r;
+      minVal = min(minVal, v);
+    }
+  }
+
+  textureStore(outTex,
+    vec2<i32>(id.xy),
+    vec4<f32>(minVal,minVal,minVal,1.0));
+}
+`);
+
+      // ---------- DILATION ----------
+      const dilationPipeline = computePipeline(`
+@group(0) @binding(0) var inputTex : texture_2d<f32>;
+@group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+  var maxVal : f32 = 0.0;
+
+  for (var y:i32=-${K}; y<=${K}; y++) {
+    for (var x:i32=-${K}; x<=${K}; x++) {
+
+      let c = vec2<i32>(id.xy) + vec2<i32>(x,y);
+
+      if (c.x < 0 || c.y < 0 ||
+          c.x >= i32(dims.x) ||
+          c.y >= i32(dims.y)) {
+        continue;
+      }
+
+      let v = textureLoad(inputTex, c, 0).r;
+      maxVal = max(maxVal, v);
+    }
+  }
+
+  textureStore(outTex,
+    vec2<i32>(id.xy),
+    vec4<f32>(maxVal,maxVal,maxVal,1.0));
+}
+`);
+
+      // ---------- SUBTRACTION ----------
+      const subtractPipeline = computePipeline(`
+@group(0) @binding(0) var a : texture_2d<f32>;
+@group(0) @binding(1) var b : texture_2d<f32>;
+@group(0) @binding(2) var outTex : texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+  let av = textureLoad(a, vec2<i32>(id.xy), 0).r;
+  let bv = textureLoad(b, vec2<i32>(id.xy), 0).r;
+
+  let r = max(av - bv, 0.0);
+
+  textureStore(outTex,
+    vec2<i32>(id.xy),
+    vec4<f32>(r,r,r,1.0));
+}
+`);
+
+      // ---------- PRESENT PIPELINE ----------
+      const renderPipeline = device.createRenderPipeline({
+        layout: "auto",
+        vertex: {
+          module: device.createShaderModule({
+            code: `
+      @vertex
+      fn main(@builtin(vertex_index) i : u32)
+        -> @builtin(position) vec4<f32> {
+
+        var pos = array<vec2<f32>,6>(
+          vec2(-1,-1), vec2(1,-1), vec2(-1,1),
+          vec2(-1,1),  vec2(1,-1), vec2(1,1)
+        );
+
+        return vec4(pos[i],0,1);
+      }
+      `,
+          }),
+          entryPoint: "main",
+        },
+        fragment: {
+          module: device.createShaderModule({
+            code: `
+      @group(0) @binding(0) var tex : texture_2d<f32>;
+      @group(0) @binding(1) var samp : sampler;
+
+      @fragment
+      fn main(@builtin(position) pos : vec4<f32>)
+        -> @location(0) vec4<f32> {
+
+        let uv = pos.xy / vec2<f32>(${width}.0, ${height}.0);
+        return textureSample(tex, samp, uv);
+      }
+      `,
+          }),
+          entryPoint: "main",
+          targets: [{ format }],
+        },
+        primitive: { topology: "triangle-list" },
+      });
+
+      const sampler = device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest",
+      });
+
+      let mode = "none";
+
+      function dispatch(pipeline, bindings) {
+        const bindGroup = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: bindings,
+        });
+
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(
+          Math.ceil(width / WORKGROUP),
+          Math.ceil(height / WORKGROUP),
+        );
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+      }
+
+      function frame() {
+        const videoTex = getVideoTexture();
+
+        // Grayscale
+        dispatch(grayscalePipeline, [
+          { binding: 0, resource: videoTex },
+          { binding: 1, resource: grayTex.createView() },
+        ]);
+
+        if (mode === "none") {
+          render(grayTex);
+          requestAnimationFrame(frame);
+          return;
         }
 
-        function setMode(mode) {
-            currentMode = mode;
-            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            if(mode === 'none') document.getElementById('btnNone').classList.add('active');
-            if(mode === 'white') document.getElementById('btnWhiteTopHat').classList.add('active');
-            if(mode === 'black') document.getElementById('btnBlackTopHat').classList.add('active');
-            document.getElementById('modeText').innerText = mode.toUpperCase();
+        // Opening
+        dispatch(erosionPipeline, [
+          { binding: 0, resource: grayTex.createView() },
+          { binding: 1, resource: erodeTex.createView() },
+        ]);
+
+        dispatch(dilationPipeline, [
+          { binding: 0, resource: erodeTex.createView() },
+          { binding: 1, resource: dilateTex.createView() },
+        ]);
+
+        if (mode === "white") {
+          dispatch(subtractPipeline, [
+            { binding: 0, resource: grayTex.createView() },
+            { binding: 1, resource: dilateTex.createView() },
+            { binding: 2, resource: resultTex.createView() },
+          ]);
         }
 
-        function onWindowResize() {
-            renderer.setSize(window.innerWidth, window.innerHeight);
+        if (mode === "black") {
+          dispatch(dilationPipeline, [
+            { binding: 0, resource: grayTex.createView() },
+            { binding: 1, resource: tempTex.createView() },
+          ]);
+
+          dispatch(erosionPipeline, [
+            { binding: 0, resource: tempTex.createView() },
+            { binding: 1, resource: dilateTex.createView() },
+          ]);
+
+          dispatch(subtractPipeline, [
+            { binding: 0, resource: dilateTex.createView() },
+            { binding: 1, resource: grayTex.createView() },
+            { binding: 2, resource: resultTex.createView() },
+          ]);
         }
 
-        function animate() {
-            requestAnimationFrame(animate);
-            render();
+        render(resultTex);
+        requestAnimationFrame(frame);
+      }
 
-            frameCount++;
-            const now = performance.now();
-            if (now - lastTime >= 1000) {
-                document.getElementById('fps').innerText = Math.round((frameCount * 1000) / (now - lastTime));
-                frameCount = 0;
-                lastTime = now;
-            }
-        }
+      function render(tex) {
+        const view = context.getCurrentTexture().createView();
 
-        function render() {
-            const mesh = scene.children[0];
+        const bindGroup = device.createBindGroup({
+          layout: renderPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: tex.createView() },
+            { binding: 1, resource: sampler },
+          ],
+        });
 
-            // Pass 1: Grayscale
-            mesh.material = grayscalePass;
-            renderer.setRenderTarget(grayscaleTarget);
-            renderer.render(scene, camera);
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view,
+              loadOp: "clear",
+              storeOp: "store",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            },
+          ],
+        });
 
-            if (currentMode === 'none') {
-                renderer.setRenderTarget(null);
-                renderer.render(scene, camera);
-                return;
-            }
+        pass.setPipeline(renderPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
 
-            if (currentMode === 'white') {
-                // Opening: Erode then Dilate
-                mesh.material = erodePass;
-                erodePass.uniforms.tDiffuse.value = grayscaleTarget.texture;
-                renderer.setRenderTarget(erodeTarget);
-                renderer.render(scene, camera);
+        device.queue.submit([encoder.finish()]);
+      }
 
-                mesh.material = dilatePass;
-                dilatePass.uniforms.tDiffuse.value = erodeTarget.texture;
-                renderer.setRenderTarget(dilateTarget);
-                renderer.render(scene, camera);
+      document.getElementById("none").onclick = () => setMode("none");
+      document.getElementById("white").onclick = () => setMode("white");
+      document.getElementById("black").onclick = () => setMode("black");
 
-                // Subtraction: Original - Opened
-                mesh.material = subtractPass;
-                subtractPass.uniforms.tOriginal.value = grayscaleTarget.texture;
-                subtractPass.uniforms.tProcessed.value = dilateTarget.texture;
-                subtractPass.uniforms.reverse.value = false;
-            } else if (currentMode === 'black') {
-                // Closing: Dilate then Erode
-                mesh.material = dilatePass;
-                dilatePass.uniforms.tDiffuse.value = grayscaleTarget.texture;
-                renderer.setRenderTarget(dilateTarget);
-                renderer.render(scene, camera);
+      function setMode(m) {
+        mode = m;
+        document
+          .querySelectorAll("button")
+          .forEach((b) => b.classList.remove("active"));
+        document.getElementById(m).classList.add("active");
+      }
 
-                mesh.material = erodePass;
-                erodePass.uniforms.tDiffuse.value = dilateTarget.texture;
-                renderer.setRenderTarget(erodeTarget);
-                renderer.render(scene, camera);
-
-                // Subtraction: Closed - Original
-                mesh.material = subtractPass;
-                subtractPass.uniforms.tOriginal.value = grayscaleTarget.texture;
-                subtractPass.uniforms.tProcessed.value = erodeTarget.texture;
-                subtractPass.uniforms.reverse.value = true;
-            }
-
-            renderer.setRenderTarget(null);
-            renderer.render(scene, camera);
-        }
-
-        init();
+      requestAnimationFrame(frame);
     </script>
-</body>
+  </body>
 </html>
