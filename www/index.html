@@ -31,6 +31,7 @@
       <button id="none" class="active">Original</button>
       <button id="white">White TopHat</button>
       <button id="black">Black TopHat</button>
+      <button id="threshold">Threshold (Auto)</button>
     </div>
 
     <canvas id="gpuCanvas"></canvas>
@@ -97,6 +98,7 @@
       const dilateTex = createStorageTexture();
       const tempTex = createStorageTexture();
       const resultTex = createStorageTexture();
+      const thresholdTex = createStorageTexture();
 
       const WORKGROUP = 8;
       const K = 3;
@@ -225,6 +227,59 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 }
 `);
 
+      // ---------- HISTOGRAM ----------
+      const histogramPipeline = computePipeline(`
+@group(0) @binding(0) var inputTex : texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> histogram : array<atomic<u32>, 256>;
+
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+
+  let dims = textureDimensions(inputTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+  let v = textureLoad(inputTex, vec2<i32>(id.xy), 0).r;
+  let bin = u32(v * 255.0);
+  atomicAdd(&histogram[bin], 1u);
+}
+`);
+
+      // ---------- THRESHOLDING ----------
+      const thresholdPipeline = computePipeline(`
+@group(0) @binding(0) var inputTex : texture_2d<f32>;
+@group(0) @binding(1) var outTex : texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> thresholdValue : f32;
+
+@compute @workgroup_size(${WORKGROUP},${WORKGROUP})
+fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+
+  let dims = textureDimensions(outTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+
+  let v = textureLoad(inputTex, vec2<i32>(id.xy), 0).r;
+  let bw = select(0.0, 1.0, v > thresholdValue);
+
+  textureStore(outTex,
+    vec2<i32>(id.xy),
+    vec4<f32>(bw,bw,bw,1.0));
+}
+`);
+
+      // ---------- THRESHOLD UNIFORM BUFFER ----------
+      const thresholdBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      // ---------- HISTOGRAM BUFFER ----------
+      const histogramBuffer = device.createBuffer({
+        size: 256 * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        mappedAtCreation: true,
+      });
+      new Uint32Array(histogramBuffer.getMappedRange()).fill(0);
+      histogramBuffer.unmap();
+
       // ---------- PRESENT PIPELINE ----------
       const renderPipeline = device.createRenderPipeline({
         layout: "auto",
@@ -272,6 +327,100 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
         minFilter: "nearest",
       });
 
+      function computeAutoThreshold() {
+        // choose source texture (grayscale or latest morphology result)
+        const sourceView =
+          lastMorph === "white" || lastMorph === "black"
+            ? resultTex.createView()
+            : grayTex.createView();
+
+        // Compute histogram to find Otsu threshold
+        const histogramGPUBuffer = device.createBuffer({
+          size: 256 * 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          mappedAtCreation: true,
+        });
+        new Uint32Array(histogramGPUBuffer.getMappedRange()).fill(0);
+        histogramGPUBuffer.unmap();
+
+        const histBindGroup = device.createBindGroup({
+          layout: histogramPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: sourceView },
+            { binding: 1, resource: histogramGPUBuffer },
+          ],
+        });
+
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(histogramPipeline);
+        pass.setBindGroup(0, histBindGroup);
+        pass.dispatchWorkgroups(
+          Math.ceil(width / WORKGROUP),
+          Math.ceil(height / WORKGROUP),
+        );
+        pass.end();
+
+        const stagingBuffer = device.createBuffer({
+          size: 256 * 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        encoder.copyBufferToBuffer(
+          histogramGPUBuffer,
+          0,
+          stagingBuffer,
+          0,
+          256 * 4,
+        );
+        device.queue.submit([encoder.finish()]);
+
+        stagingBuffer.mapAsync(GPUMapMode.READ).then(() => {
+          const histogram = new Uint32Array(stagingBuffer.getMappedRange());
+          const totalPixels = width * height;
+
+          // Otsu's method
+          let sum = 0;
+          for (let i = 0; i < 256; i++) {
+            sum += i * histogram[i];
+          }
+
+          let sumB = 0;
+          let countB = 0;
+          let maxVariance = 0;
+          let threshold = 0;
+
+          for (let t = 0; t < 256; t++) {
+            countB += histogram[t];
+            if (countB === 0) continue;
+
+            const countF = totalPixels - countB;
+            if (countF === 0) break;
+
+            sumB += t * histogram[t];
+            const meanB = sumB / countB;
+            const meanF = (sum - sumB) / countF;
+
+            const variance =
+              countB * countF * (meanB - meanF) * (meanB - meanF);
+            if (variance > maxVariance) {
+              maxVariance = variance;
+              threshold = t;
+            }
+          }
+
+          device.queue.writeBuffer(
+            thresholdBuffer,
+            0,
+            new Float32Array([threshold / 255.0]),
+          );
+          stagingBuffer.unmap();
+          histogramGPUBuffer.destroy();
+          stagingBuffer.destroy();
+        });
+      }
+
+      let lastThresholdCompute = 0;
+
       let mode = "none";
 
       function dispatch(pipeline, bindings) {
@@ -303,6 +452,64 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
 
         if (mode === "none") {
           render(grayTex);
+          requestAnimationFrame(frame);
+          return;
+        }
+
+        if (mode === "threshold") {
+          // if we previously applied a top-hat, recompute it to keep resultTex up-to-date
+          if (lastMorph === "white") {
+            // same logic as white mode
+            dispatch(erosionPipeline, [
+              { binding: 0, resource: grayTex.createView() },
+              { binding: 1, resource: erodeTex.createView() },
+            ]);
+            dispatch(dilationPipeline, [
+              { binding: 0, resource: erodeTex.createView() },
+              { binding: 1, resource: dilateTex.createView() },
+            ]);
+            dispatch(subtractPipeline, [
+              { binding: 0, resource: grayTex.createView() },
+              { binding: 1, resource: dilateTex.createView() },
+              { binding: 2, resource: resultTex.createView() },
+            ]);
+          } else if (lastMorph === "black") {
+            // same logic as black mode
+            dispatch(dilationPipeline, [
+              { binding: 0, resource: grayTex.createView() },
+              { binding: 1, resource: tempTex.createView() },
+            ]);
+            dispatch(erosionPipeline, [
+              { binding: 0, resource: tempTex.createView() },
+              { binding: 1, resource: dilateTex.createView() },
+            ]);
+            dispatch(subtractPipeline, [
+              { binding: 0, resource: dilateTex.createView() },
+              { binding: 1, resource: grayTex.createView() },
+              { binding: 2, resource: resultTex.createView() },
+            ]);
+          }
+
+          // Compute threshold every 10 frames
+          lastThresholdCompute++;
+          if (lastThresholdCompute > 10) {
+            computeAutoThreshold();
+            lastThresholdCompute = 0;
+          }
+
+          // pick input based on lastMorph
+          const inputView =
+            lastMorph === "white" || lastMorph === "black"
+              ? resultTex.createView()
+              : grayTex.createView();
+
+          dispatch(thresholdPipeline, [
+            { binding: 0, resource: inputView },
+            { binding: 1, resource: thresholdTex.createView() },
+            { binding: 2, resource: thresholdBuffer },
+          ]);
+
+          render(thresholdTex);
           requestAnimationFrame(frame);
           return;
         }
@@ -382,14 +589,30 @@ fn main(@builtin(global_invocation_id) id : vec3<u32>) {
       document.getElementById("none").onclick = () => setMode("none");
       document.getElementById("white").onclick = () => setMode("white");
       document.getElementById("black").onclick = () => setMode("black");
+      document.getElementById("threshold").onclick = () => setMode("threshold");
 
+      // remember last morphology choice so threshold can use it
+      let lastMorph = "none";
       function setMode(m) {
+        // record white/black/none as lastMorph before switching to threshold
+        if (m === "white" || m === "black" || m === "none") {
+          lastMorph = m;
+        }
+
         mode = m;
         document
           .querySelectorAll("button")
           .forEach((b) => b.classList.remove("active"));
         document.getElementById(m).classList.add("active");
+
+        // Initialize threshold when entering threshold mode
+        if (m === "threshold") {
+          computeAutoThreshold();
+        }
       }
+
+      // Initialize threshold buffer with default
+      device.queue.writeBuffer(thresholdBuffer, 0, new Float32Array([0.5]));
 
       requestAnimationFrame(frame);
     </script>
